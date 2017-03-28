@@ -12,12 +12,10 @@ Package.describe({
 
 Package.onUse(function(api) {
   api.versionsFrom('1.2.1');
-  api.use('ecmascript');
-  api.use("mizzao:user-status@0.6.6");
-  api.use(['templating'], 'client');
-  api.addFiles(['services/server.js', 'services/publish.js'], "server");
-  api.addFiles(['template.js', 'services/client.js'], "client");
-  api.export(['VideoChatCallLog', 'VideoCallServices', "renderCallTemplate"]);
+  api.use(['ecmascript', 'random', 'accounts-base']);
+  api.addFiles(['server.js'], "server");
+  api.addFiles(['lib.js']);
+  api.export([]);
 });
 
 Package.onTest(function(api) {

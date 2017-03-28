@@ -17,19 +17,28 @@ if (Meteor.isServer) {
     Meteor.methods({
         "VideoChat/Call" (targets) {
             let mvc_arr_usr = [];
-            targets.forEach(usr => mvc_arr_usr.push({
-                usr,
-                sts_dt: new Date(),
-                sts: "N"
-            }));
+            let sts_dt;
+            targets.forEach(usr => {
+                //Shitty hack to ensure that each user has a unique time
+                // if (!usr) throw new Meteor.Error(500, "Null user found");
+                sts_dt = sts_dt ? sts_dt + 1 : new Date().getTime();
+                mvc_arr_usr.push({
+                    usr,
+                    sts_dt: new Date(sts_dt),
+                    sts: usr === Meteor.userId() ? "C" : "N"
+                });
+            });
+
             Meteor.VideoChat.collection.insert({
-                mvc_arr_usr
+                mvc_arr_usr,
+                mvc_dt_crt: new Date(),
+                mvc_bol_sts: true
             })
             return targets;
         },
         "VideoChat/UserOnline" () {
             Meteor.users.update({
-                _id: Meteor.userId
+                _id: Meteor.userId()
             }, {
                 'profile.video_chat': true,
                 'profile.online': true,
@@ -53,18 +62,28 @@ if (Meteor.isServer) {
     });
     Meteor.publish("video_chat", function() {
         return Meteor.VideoChat.collection.find({
-            "mvc_arr_usr.usr": this.userId,
-            $or: [{
-                "mvc_arr_usr.sts": "N",
-                "mvc_arr_usr.sts": "C"
-            }]
+            mvc_bol_sts: true,
+            mvc_arr_usr: {
+                $elemMatch: {
+                    usr: this.userId,
+                    $or: [{
+                        sts: "N"
+                    }, {
+                        sts: "C"
+                    }]
+                }
+            }
         });
     });
     Meteor.publish("video_chat_data", function() {
-        return Meteor.VideoChat.data_channel.find({
+        const dataCursor = Meteor.VideoChat.data_channel.find({
             target: this.userId,
             status: "N"
         });
+        Meteor.VideoChat.data_channel.remove({
+            _id: dataCursor.fetch()._id
+        });
+        return dataCursor;
     });
 }
 
@@ -77,8 +96,9 @@ Meteor.VideoChat = new class {
         this.sub = undefined;
         this.dataSub = undefined;
         this.tracker = undefined;
-        this.connections = [];
+        this.connections = {};
         this.stream = undefined;
+        this.currentCall = undefined;
         this.STUNTURN = [{
             url: 'stun:stun01.sipphone.com'
         }, {
@@ -153,10 +173,22 @@ Meteor.VideoChat = new class {
             this.stream = Meteor.connection._stream.on('message', message => {
                 message = JSON.parse(message);
                 console.log(message);
-                if (message.msg == "changed" && message.collection == "video_chat" && message.fields != undefined) {
-
+                if (message.msg == "changed" && message.collection == "VideoChat" && message.fields != undefined) {
+                    if (message.fields.mvc_arr_usr) {
+                        this.currentCall = message._id;
+                        this.updateConnections(message.fields);
+                    }
                 }
-                if (message.msg == "new" && message.collection == "video_chat_data" && message.fields != undefined) {
+                if (message.msg == "removed" && message.collection == "VideoChat") {
+                    if (message._id == this.currentCall)
+                        this.endCall();
+                }
+                if (message.msg == "added" && message.collection == "VideoChat") {
+                    if (message.fields.mvc_arr_usr) {
+                        this.updateConnections(message.fields);
+                    }
+                }
+                if (message.msg == "added" && message.collection == "VideoChatData" && message.fields != undefined) {
                     const fields = message.fields;
                     Meteor.call("VideoChat/UpdateDataChannel", fields._id, err => {
                         if (err) return console.log(err);
@@ -176,45 +208,47 @@ Meteor.VideoChat = new class {
 
         Meteor.call("VideoChat/UserOnline");
     }
+
     kill() {
-        this.connections = [];
+        this.connections = {};
         this.tracker = undefined;
         this.sub = undefined;
         this.dataSub = undefined;
     }
+    updateConnections(fields) {
+        let self = this;
+        fields.mvc_arr_usr.forEach(usr => {
+            if (self.connections[usr.usr]) {
+                self.connections[usr.usr].sts_dt = usr.sts_dt;
+                self.connections[usr.usr].sts = usr.sts;
+            }
+            else
+                self.connections[usr.usr] = usr;
+        });
+    }
+    endCall() {
+        this.currentCall = undefined;
+        this.connections = {};
+        this.onEndCall();
+    }
     call(users) {
         Meteor.call("VideoChat/Call", users, (err, targets) => {
             if (err) return console.log(err);
-            targets.forEach(target => this.connections.push(target))
+            targets.forEach(target => this.connections[target] = target)
         });
     }
     setSDP(fields) {
-        let thisUserData = {},
-            targetUserData = {};
-        const thisUserIndex = this.connections.findIndex(element => {
-            if (element.usr === Meteor.userId()) {
-                thisUserData = element;
-                return true;
-            }
-            else return false;
-        });
-        const targetUserIndex = this.connection.findIndex(element => {
-            if (element.usr === fields.sender) {
-                targetUserData = element;
-                return true;
-            }
-            else return false;
-        });
-        if (thisUserData.sts_dt < targetUserData.sts_dt) {
-            this.connections[thisUserIndex].connection.setRemoteDescription(fields.data, function() {
+
+        if (this.connections[Meteor.userId()].sts_dt < this.connections[fields.target].sts_dt) {
+            this.connections[Meteor.userId()].connection.setRemoteDescription(fields.data, function() {
 
             }, function() {
 
             });
         }
         else {
-            this.connections[thisUserIndex].connection = new RTCPeerConnection(this.STUNTURN);
-            this.connections[thisUserIndex].connection.setRemoteDescription(fields.data, function() {
+            this.connections[Meteor.userId()].connection = new RTCPeerConnection(this.STUNTURN);
+            this.connections[Meteor.userId()].connection.setRemoteDescription(fields.data, function() {
 
             }, function() {
 
